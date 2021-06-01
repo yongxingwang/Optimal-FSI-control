@@ -1,0 +1,94 @@
+// FSI with same variable for NS and structure
+int m=30; 
+real rhof=1, muf=0.1,g=0, penal=0, T=2, dt=0.01, t, err, alpha=1.e-12;
+      
+// Fluid region
+border b1(t=0,1) {x=t;  y=0 ;label=1;};
+border b2(t=0,1) {x=1; y=t ;label=2;};
+border b3(t=1,0) {x=t;  y=1 ;label=3;};
+border b4(t=1,0) {x=0; y=t ;label=4;};
+
+mesh Th = buildmesh(b1(m)+b2(m)+b3(m)+b4(m));
+plot(Th, wait=1);
+
+fespace Vh(Th,P2);
+fespace Ph(Th,P1);
+fespace Rh(Th,[P2,P2,P1]); // NS space
+fespace RhAdj(Th,[P2,P2,P1,P2,P2,P1]); // NS space
+
+Ph p,ph,phat,phath;
+Vh u,v,uhat,vhat,uh,vh,uhath,vhath,uold=0,vold=0,ug,vg,uu;
+
+macro div(u,v) ( dx(u)+dy(v) ) // EOM
+macro DD(u,v)  [[2*dx(u),div(v,u)],[div(v,u),2*dy(v)]] // EOM
+macro Grad(u,v)[[dx(u),dy(u)],[dx(v),dy(v)]] // EOM
+macro ID() [[1,0],[0,1]] // end of macro
+macro theta(w,t) ( (1-w)*(1-w)*(1-cos(4*pi*w*t)) ) // end of macro
+macro dtheta(w,t) ( 2*(w-1)*(1-cos(4*pi*w*t)) + (1-w)*(1-w)*sin(4*pi*w*t)*4*pi*t ) // end of macro
+
+
+varf NS([u,v,p],[uh,vh,ph]) =
+	int2d(Th)(rhof*[u,v]'*[uh,vh]/dt- div(uh,vh)*p -div(u,v)*ph + penal*p*ph 
+	+ muf/2*trace(DD(u,v)'*DD(uh,vh)))
+	+ on(1,2,3,4,u=0,v=0);
+
+varf resNS([u,v,p],[uh,vh,ph]) =
+	int2d(Th)(g*rhof*vh+rhof*[convect([uold,vold],-dt,uold),
+	convect([uold,vold],-dt,vold)]'*[uh,vh]/dt )
+	+ on(1,2,3,4,u=0,v=0);
+
+varf NSAdj([u,v,p,uhat,vhat,phat],[uh,vh,ph,uhath,vhath,phath]) =
+	int2d(Th)(rhof*[u,v]'*[uh,vh]/dt- div(uh,vh)*p -div(u,v)*ph + penal*p*ph 
+	+rhof*[uhat,vhat]'*[uhath,vhath]/dt -div(uhath,vhath)*phat-div(uhat,vhat)*phath + penal*phat*phath
+	+ rhof*[uhath,vhath]'*(Grad(uold,vold)'*[uhat,vhat])
+	- rhof*[uhath,vhath]'*(Grad(uhat,vhat) *[uold,vold])	
+	+ muf/2*trace(DD(u,v)'*DD(uh,vh))
+	+ muf/2*trace(DD(uhat,vhat)'*DD(uhath,vhath))	
+	-[uhat,vhat]'*[uh,vh]/alpha
+	+[u,v]'*[uhath,vhath]
+	)
+	+ on(1,2,3,4,u=0,v=0,uhat=0,vhat=0);
+
+
+varf resNSAdj([u,v,p,uhat,vhat,phat],[uh,vh,ph,uhath,vhath,phath]) =
+	int2d(Th)(g*rhof*vh+rhof*[convect([uold,vold],-dt,uold),
+	convect([uold,vold],-dt,vold)]'*[uh,vh]/dt 
+	+[ug,vg]'*[uhath,vhath]
+	)
+	+ on(1,2,3,4,u=0,v=0,uhat=0,vhat=0);
+
+
+matrix K = NSAdj(RhAdj,RhAdj);
+set(K,solver=UMFPACK);
+
+for(t=dt;t<T;t+=dt){
+	ug =  theta(x,t)*dtheta(y,t);
+	vg = -dtheta(x,t)*theta(y,t);
+	real[int] rhsAdj = resNSAdj(0,RhAdj);
+
+	RhAdj [w1, w2, wp, wh1, wh2, whp];
+	// Solve
+	real[int] sol(RhAdj.ndof);
+	sol= w1[];
+	sol = K^-1 * rhsAdj;
+	w1[]=sol; u=w1; v= w2; p=wp; uhat=wh1; vhat=wh2; phat=whp;
+
+	uold=u;vold=v;
+
+	uu=sqrt(u^2+v^2);
+	plot(Th,uu,coef=0.1,fill=1,value=1,ps="velocity.eps",wait=0);
+	err=sqrt(int2d(Th)((u-ug)^2+(v-vg)^2))/sqrt(int2d(Th)(ug^2+vg^2));
+	cout<<"Control Time: "<<t<<"  "<<err<<endl;
+	
+	ofstream file("objective.txt",append);
+	file.precision(16);
+	file << err << endl;
+	file.flush;	
+	
+	err=sqrt(int2d(Th)((uhat)^2+(vhat)^2))/alpha;
+	ofstream file1("force.txt",append);
+	file1.precision(16);
+	file1 << err << endl;
+	file1.flush;		
+}
+

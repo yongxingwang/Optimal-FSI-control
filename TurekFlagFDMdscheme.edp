@@ -1,0 +1,216 @@
+// FSI control using two meshes
+real muf=1,c1=2.e6,penal=1e-16,g=-0,rhof=1.e3,rhos=1.e3,rhod=rhos-rhof;
+real dt=0.001, t, T0=3, Tc=4, mus=dt*c1-muf;
+real x0=0.2, y0=0.2, r=0.05, L=2.5, H=0.41, h=0.02, l=0.35, theta=0.2013579208;
+real x1=x0+r*cos(theta), y1=y0-h/2, x2=x1, y2=y0+h/2;
+real alpha=1.e-17, xtip=0.6,ytip=y0,xto=xtip,yto=ytip;
+int mh=3, m=20;
+
+//fluid region
+border a1(t=0,L) {x=t; y=0 ;label=1;};
+border a2(t=0,H) {x=L; y=t ;label=2;};
+border a3(t=L,0) {x=t; y=H ;label=1;};
+border a4(t=H,0) {x=0; y=t ;label=3;};
+//hole
+border disc(t=0, 2*pi)  {x=x0+r*cos(t); y=y0+r*sin(t); label=4;};  
+//lines to refine mesh
+border l0(t=0.25,0.6) {x=t; y=y0;label=5;};
+border l1(t=x2,0.6) {x=t; y=0.04*(x-x2)/l+y2;  label=5;};
+border l2(t=x1,0.6) {x=t; y=-0.04*(x-x1)/l+y1; label=5;};
+
+plot(a1(L*m/H)+a2(m)+a3(L*m/H)+a4(m)+disc(pi*mh/theta)+l0(l*mh/h)+l1(l*mh/h)+l2(l*mh/h), wait=1, dim=2);
+
+mesh Th = buildmesh(a1(L*m/H)+a2(m)+a3(L*m/H)+a4(m)+disc(-pi*mh/theta)+l0(l*mh/h)+l1(l*mh/h)+l2(l*mh/h));
+//plot(Th, wait=1);
+// Solid Region
+border b1(t=x1,0.6) {x=t; y=y1 ;label=5;};
+border b2(t=y1,y2) {x=0.6; y=t ;label=5;};
+border b3(t=0.6,x2) {x=t; y=y2 ;label=5;};
+border b4(t=theta,-theta) {x=x0+r*cos(t); y=y0+r*sin(t);label=5;};
+plot(b1(l*mh/h)+b2(mh)+b3(l*mh/h)+b4(mh), wait=1, dim=2);
+
+mesh Ths = buildmesh(b1(l*mh/h)+b2(mh)+b3(l*mh/h)+b4(mh));
+plot(Ths, Th, wait=1);
+
+mesh Thso=Ths, Ths0=Ths;
+fespace Vh(Th,P2);
+fespace Ph(Th,P1);
+fespace Vhs(Ths,P2);
+fespace Vhso(Thso,P2);
+fespace Rh(Th,[P2,P2,P1]);
+fespace RhAdj(Th,[P2,P2,P2,P2,P1,P1]);
+fespace Rhs(Ths,[P2,P2]);
+fespace RhsAdj(Ths,[P2,P2,P2,P2]);
+
+Ph p,ph,phat,phath;
+Vh u,v,uhat,vhat,uh,vh,uhath,vhath,uold=0,vold=0,uu;
+Vhs us,vs,ushat=0,vshat=0,ush,vsh,ushath,vshath,usold=0,vsold=0,d1=0,d2=0,dg1=0,dg2=0; 
+Vhso uso,vso,usohat,vsohat,do1,do2;;
+
+macro div(u,v) ( dx(u)+dy(v) ) // EOM
+macro DD(u,v)  [[2*dx(u),div(v,u)],[div(v,u),2*dy(v)]] // EOM
+macro Grad(u,v)[[dx(u),dy(u)],[dx(v),dy(v)]] // EOM
+
+
+varf fluid([u,v,p],[uh,vh,ph]) =
+	int2d(Th)(rhof*[u,v]'*[uh,vh]/dt- div(uh,vh)*p -div(u,v)*ph + penal*p*ph 
+	+ muf/2*trace(DD(u,v)'*DD(uh,vh)))
+	+ on(1,u=0, v=0) + on(3,u=12*y*(H-y)/H/H,v=0) + on(4,u=0,v=0);
+
+varf resf([u,v,p],[uh,vh,ph]) =
+	int2d(Th)(g*rhof*vh+rhof*[convect([uold,vold],-dt,uold),
+	convect([uold,vold],-dt,vold)]'*[uh,vh]/dt )
+	+ on(1,u=0, v=0) + on(3,u=12*y*(H-y)/H/H,v=0) + on(4,u=0,v=0);
+
+varf solid([us,vs],[ush,vsh]) =
+	int2d(Ths)( rhod*[us,vs]'*[ush,vsh]/dt
+	+ mus/2*trace(DD(us,vs)'*DD(ush,vsh))
+	- dt*c1*trace((Grad(us,vs)'*Grad(d1,d2)+Grad(d1,d2)'*Grad(us,vs))*Grad(ush,vsh)')) ;
+
+varf ress([us,vs],[ush,vsh]) =	
+	int2d(Ths)( g*rhod*vsh - c1*trace((DD(d1,d2) - Grad(d1,d2)'*Grad(d1,d2))*Grad(ush,vsh)')  
+	+ rhod*[usold,vsold]'*[ush,vsh]/dt );
+
+matrix A = fluid(Rh,Rh);
+
+ofstream file0("tip_disp.txt");
+file0.precision(16);
+for(t=dt;t<T0;t+=dt){
+	real[int] rhs1 = resf(0,Rh);
+
+	real[int] rhs2 = ress(0,Rhs);
+	matrix A = fluid(Rh,Rh);
+	matrix B = solid(Rhs,Rhs);
+	matrix P = interpolate(Rhs,Rh);
+	real[int] rhs = P'*rhs2;
+	rhs += rhs1;
+	matrix T = P'*B;
+	matrix AB = T*P;
+	AB+=A;
+
+	set(AB,solver=UMFPACK);
+
+	Rh [w1, w2, wp];
+	// Solve
+	real[int] sol(Rh.ndof);
+	sol= w1[];
+	sol = AB^-1 * rhs;
+	w1[]=sol; u=w1; v= w2; p=wp;
+
+	Thso=Ths;
+	uso=u; vso=v; do1=d1; do2=d2;
+	
+	xtip += uso(xto,yto)*dt; ytip += vso(xto,yto)*dt;
+	xto=xtip;yto=ytip;		
+	
+	Ths = movemesh(Ths, [x+us*dt, y+vs*dt]);
+
+	d1=0;  d1[]=do1[]+uso[]*dt; 
+	d2=0;  d2[]=do2[]+vso[]*dt; 
+	us=0;  us[]=uso[];
+	vs=0;  vs[]=vso[];
+	
+	uold=u;vold=v; usold=us;vsold=vs;
+	
+	uu=sqrt(u^2+v^2);
+	plot(uu,Ths,coef=0.1,fill=1,value=1,wait=0);
+	
+	//real err=sqrt(int2d(Ths)((d1-dg1)^2+(d2-dg2)^2));
+	//real force=sqrt(int2d(Ths)(ushat^2+vshat^2))/alpha;
+
+	file0 <<d2(xtip,ytip)<< endl;	
+	cout<<"NS Time: "<<t<<endl;
+}
+
+
+
+/////////////////////////////////////////////////////////////////////////
+varf NSAdj([u,v,uhat,vhat,p,phat],[uh,vh,uhath,vhath,ph,phath]) =
+	int2d(Th)(rhof*[u,v]'*[uh,vh]/dt- div(uh,vh)*p -div(u,v)*ph + penal*p*ph 
+	+rhof*[uhat,vhat]'*[uhath,vhath]/dt -div(uhath,vhath)*phat-div(uhat,vhat)*phath + penal*phat*phath
+	+ rhof*[uhath,vhath]'*(Grad(uold,vold)'*[uhat,vhat])
+	- rhof*[uhath,vhath]'*(Grad(uhat,vhat) *[uold,vold])	
+	+ muf/2*trace(DD(u,v)'*DD(uh,vh))
+	+ muf/2*trace(DD(uhat,vhat)'*DD(uhath,vhath))	
+	)
+	+ on(1,u=0,v=0,uhat=0,vhat=0) + on(3,u=12*y*(H-y)/H/H,v=0,uhat=0,vhat=0) + on(4,u=0,v=0,uhat=0,vhat=0);
+
+varf resNSAdj([u,v,uhat,vhat,p,phat],[uh,vh,uhath,vhath,ph,phath]) =
+	int2d(Th)(g*rhof*vh+rhof*[convect([uold,vold],-dt,uold),
+	convect([uold,vold],-dt,vold)]'*[uh,vh]/dt 
+	)
+	+ on(1,u=0,v=0,uhat=0,vhat=0) + on(3,u=12*y*(H-y)/H/H,v=0,uhat=0,vhat=0) + on(4,u=0,v=0,uhat=0,vhat=0);
+
+varf solidAdj([us,vs,ushat,vshat],[ush,vsh,ushath,vshath]) =
+	int2d(Ths)(rhod*[us,vs]'*[ush,vsh]/dt 
+	+ rhod*[ushath,vshath]'*[ushat,vshat]/dt
+	+ mus/2*trace(DD(us,vs)'*DD(ush,vsh))
+	+ mus/2*trace(DD(ushat,vshat)'*DD(ushath,vshath))	
+	- dt*c1*trace((Grad(us,vs)'*Grad(d1,d2)+Grad(d1,d2)'*Grad(us,vs))*Grad(ush,vsh)')
+	- dt*c1*trace((Grad(ushath,vshath)'*Grad(d1,d2)+Grad(d1,d2)'*Grad(ushath,vshath))*Grad(ushat,vshat)')
+	-[ushat,vshat]'*[ush,vsh]/alpha
+	);
+
+varf ressAdj([us,vs,ushat,vshat],[ush,vsh,ushath,vshath]) =
+	int2d(Ths)(g*rhod*vsh + c1*trace((Grad(d1,d2)'*Grad(d1,d2))*Grad(ush,vsh)')  
+	-0.5*c1*trace(DD(d1,d2)*DD(ush,vsh)')
+	+ rhod*[usold,vsold]'*[ush,vsh]/dt 
+	-dt*[d1-dg1,d2-dg2]'*[ushath,vshath]
+	);
+
+matrix Aadj = NSAdj(RhAdj,RhAdj);
+
+
+ofstream file("errfoce.txt");
+file.precision(16);
+for(t=T0;t<Tc;t+=dt){
+	
+	real[int] rhs1 = resNSAdj(0,RhAdj);
+	matrix Badj = solidAdj(RhsAdj,RhsAdj);
+	real[int] rhs2 = ressAdj(0,RhsAdj);
+	matrix P = interpolate(RhsAdj,RhAdj);
+	real[int] rhs = P'*rhs2;
+	rhs += rhs1;
+	matrix T = P'*Badj;
+	matrix AB = T*P;
+	AB += Aadj;
+		
+	set(AB,solver=UMFPACK);
+
+	RhAdj [w1, w2, s1, s2, wp, sp];
+	real[int] sol(RhAdj.ndof);
+	sol= w1[];
+	sol = AB^-1 * rhs;
+	w1[]=sol; 
+	
+	u=w1; v=w2; uhat=s1; vhat= s2; p=wp; phat=sp;
+
+	Thso=Ths;
+	uso=u; vso=v; usohat=uhat; vsohat=vhat;
+	do1=d1; do2=d2;
+	
+	xtip += uso(xto,yto)*dt; ytip += vso(xto,yto)*dt;
+	xto=xtip;yto=ytip;			
+	
+	Ths = movemesh(Ths, [x+us*dt, y+vs*dt]);
+	
+	d1=0;  d1[]=do1[]+uso[]*dt; 
+	d2=0;  d2[]=do2[]+vso[]*dt; 
+	us=0;  us[]=uso[];
+	vs=0;  vs[]=vso[];		
+	ushat=0; ushat[]=usohat[]; 
+	vshat=0; vshat[]=vsohat[];
+	
+	uold=u;vold=v;usold=us;vsold=vs;
+
+	uu=sqrt(u^2+v^2);
+	plot(uu,Ths, coef=10,fill=1,value=1,wait=0);
+	
+	real err=sqrt(int2d(Ths)((d1-dg1)^2+(d2-dg2)^2));
+	real force=sqrt(int2d(Ths)(ushat^2+vshat^2))/alpha;
+	file << err <<" "<< force << endl;
+	file0 <<d2(xtip,ytip)<< endl;		
+	cout<<"Control Time: "<<t<<"  "<<err<<endl;
+}
+file0.flush;
+file.flush;

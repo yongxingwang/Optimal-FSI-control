@@ -1,0 +1,243 @@
+// FSI with same variable for NS and structure
+real g=-0, R=0.2;
+int m=20, n; 
+real muf=0.01, c1=1,  penal=1e-9, T=4, dt=0.005, t;
+real rhof=1, rhos=1, rhod=rhos-rhof;
+real xc=0.6, yc=0.5;
+real zero=0,err;
+int size, one=1,celltype=5;
+real alpha=4.e-6, Tc=10;
+string strerr="err1.txt";
+string strforce="force1.txt";
+
+// solid region
+border disc(t=0, 2*pi)  { x=xc+R*cos(t); y=yc+R*sin(t); label=7;};         
+// Fluid region
+border b1(t=0,1) {x=t;  y=0 ;label=1;};
+border b2(t=0,0.8) {x=1; y=t ;label=2;};
+border b3(t=0.8,1) {x=1; y=t ;label=3;};
+border b4(t=1,0) {x=t;  y=1 ;label=4;};
+border b5(t=1,0.8) {x=0; y=t ;label=5;};
+border b6(t=0.8,0) {x=0; y=t ;label=6;};
+
+mesh Th = buildmesh(b1(m)+b2(m)+b3(m/2)+b4(3*m)+b5(m/2)+b6(m));
+plot(Th, wait=1);
+
+mesh Ths = buildmesh(disc(m*3));
+plot(Ths, Th, wait=1);
+
+mesh Ths0=Ths;
+fespace Vh(Th,P2);
+fespace Ph(Th,P1);
+fespace Vhs(Ths,P2);
+fespace Vhs0(Ths0,P2);
+fespace Rh(Th,[P2,P2,P1]); // NS space
+fespace RhAdj(Th,[P2,P2,P2,P2,P1,P1]); // NS space
+fespace Rhs(Ths,[P2,P2]);
+fespace Rhs0(Ths0,[P2,P2]);
+fespace RhsAdj(Ths,[P2,P2,P2,P2]);
+fespace Rhs0Adj(Ths0,[P2,P2,P2,P2]);
+
+cout<<"dof: "<<Vh.ndof<<"  "<<Vhs.ndof<<endl;
+
+Ph p,ph,phat,phath;
+Vh u,v,uhat,vhat,uh,vh,uhath,vhath,uold=0,vold=0,ug,vg,uu;
+Vhs0 us,vs,ushat,vshat,ush,vsh,ushath,vshath,usold=0,vsold=0,d1=0,d2=0,dg1,dg2; 
+Vhs usn,vsn,usnh,vsnh,usnhat,vsnhat,usnhath,vsnhath,dd,uus;
+
+macro div(u,v) ( dx(u)+dy(v) ) // EOM
+macro DD(u,v)  [[2*dx(u),div(v,u)],[div(v,u),2*dy(v)]] // EOM
+macro Grad(u,v)[[dx(u),dy(u)],[dx(v),dy(v)]] // EOM
+macro ID() [[1,0],[0,1]] // end of macro
+
+
+varf NS([u,v,p],[uh,vh,ph]) =
+	int2d(Th)(rhof*[u,v]'*[uh,vh]/dt- div(uh,vh)*p -div(u,v)*ph + penal*p*ph 
+	+ muf/2*trace(DD(u,v)'*DD(uh,vh)))
+	+ on(1,2,3,5,6,u=0,v=0) + on(4,u=1,v=0) ;
+
+varf resNS([u,v,p],[uh,vh,ph]) =
+	int2d(Th)(g*rhof*vh+rhof*[convect([uold,vold],-dt,uold),
+	convect([uold,vold],-dt,vold)]'*[uh,vh]/dt )
+	+ on(1,2,3,5,6,u=0,v=0) + on(4,u=1,v=0) ;
+
+varf resStokes([u,v,p],[uh,vh,ph]) =
+	int2d(Th)(g*rhof*vh+rhof*[uold,vold]'*[uh,vh]/dt )
+	+ on(1,2,3,5,6,u=0,v=0) + on(4,u=1,v=0) ;
+
+varf solid([us,vs],[ush,vsh]) =
+	int2d(Ths0)( rhod*[us,vs]'*[ush,vsh]/dt
+	+ dt*c1*trace(Grad(us,vs)*Grad(ush,vsh)'));
+
+varf ress0([us,vs],[ush,vsh]) =	
+	int2d(Ths0)(g*rhod*vsh - c1*trace((Grad(d1,d2)+ID)*Grad(ush,vsh)')  
+	+ rhod*[usold,vsold]'*[ush,vsh]/dt );
+
+varf ress([usn,vsn],[usnh,vsnh]) =	int2d(Ths)(c1*div(usnh,vsnh));
+
+real tgv = 1e30;
+matrix A = NS(Rh,Rh,tgv=tgv);
+real[int] bcn = NS(0,Rh); //tgv on Dirichlet boundary node ( !=0 )
+matrix B = solid(Rhs0,Rhs0);
+	
+ug=u;vg=v;
+dg1=0;dg2=0;
+uold=0;vold=0;
+usold=0;vsold=0; 
+d1=0;d2=0;
+
+// compute inital NS uold, vold
+
+n=0;
+// Computation time loop
+for(t=dt;t<T;t+=dt){
+	n++;
+	cout<<"NS Time: "<<t<<endl;
+	real[int] rhs1 = resNS(0,Rh);
+	//lock boundary part:
+	rhs1 = bcn ? bcn : rhs1; //do forall i: b[i] = bcn[i] ? bcn[i] : b[i]
+
+	real[int] rhs2 = ress0(0,Rhs0);
+	real[int] rhs3 = ress(0,Rhs);
+	rhs2 += rhs3;
+
+	matrix P = interpolate(Rhs,Rh);
+	real[int] rhs = P'*rhs2;
+	rhs += rhs1;
+	matrix T = P'*B;
+	matrix AB = T*P;
+	AB += A;
+	set(AB,solver=UMFPACK);
+	Rh [w1, w2, wp];
+	// Solve
+	real[int] sol(Rh.ndof);
+	sol= w1[];
+	sol = AB^-1 * rhs;
+	w1[]=sol; u=w1; v= w2; p=wp;
+
+	usn=u; vsn=v;
+	us[]=usn[];vs[]=vsn[];
+	d1[] += us[]*dt; 
+	d2[] += vs[]*dt;
+	Ths = movemesh(Ths0, [x+d1, y+d2]);
+
+	uold=u;vold=v; usold=us;vsold=vs;
+	
+	uu=sqrt(u^2+v^2);
+	uus=sqrt(usn^2+vsn^2);
+	dd=sqrt(d1^2+d2^2);
+	plot(uu,Ths,coef=0.1,fill=1,value=1,wait=0);
+	err=sqrt(int2d(Th)((d1-dg1)^2+(d2-dg2)^2));
+	ofstream file(strerr,append);
+	file.precision(16);
+	file << err << endl;
+	file.flush;	
+}
+
+varf NSAdj([u,v,uhat,vhat,p,phat],[uh,vh,uhath,vhath,ph,phath]) =
+	int2d(Th)(rhof*[u,v]'*[uh,vh]/dt- div(uh,vh)*p -div(u,v)*ph + penal*p*ph 
+	+rhof*[uhat,vhat]'*[uhath,vhath]/dt -div(uhath,vhath)*phat-div(uhat,vhat)*phath + penal*phat*phath
+	+ rhof*[uhath,vhath]'*(Grad(uold,vold)'*[uhat,vhat])
+	- rhof*[uhath,vhath]'*(Grad(uhat,vhat) *[uold,vold])	
+	+ muf/2*trace(DD(u,v)'*DD(uh,vh))
+	+ muf/2*trace(DD(uhat,vhat)'*DD(uhath,vhath))	
+	//-[uhat,vhat]'*[uh,vh]/alpha
+	//+[u,v]'*[uhath,vhath]
+	)
+	+ on(1,2,3,5,6,u=0,v=0,uhat=0,vhat=0) 
+	+ on(4,u=1,v=0,uhat=0,vhat=0);
+
+varf resNSAdj([u,v,uhat,vhat,p,phat],[uh,vh,uhath,vhath,ph,phath]) =
+	int2d(Th)(g*rhof*vh+rhof*[convect([uold,vold],-dt,uold),
+	convect([uold,vold],-dt,vold)]'*[uh,vh]/dt 
+	//+[ug,vg]'*[uhath,vhath]
+	)
+	+ on(1,2,3,5,6,u=0,v=0,uhat=0,vhat=0) 
+	+ on(4,u=1,v=0,uhat=0,vhat=0);
+
+
+varf solid0Adj([us,vs,ushat,vshat],[ush,vsh,ushath,vshath]) =
+	int2d(Ths0)(rhod*[us,vs]'*[ush,vsh]/dt 
+	+ rhod*[ushath,vshath]'*[ushat,vshat]/dt
+	+ dt*c1*trace(Grad(us,vs)*Grad(ush,vsh)')
+	+ dt*c1*trace(Grad(ushath,vshath)*Grad(ushat,vshat)')
+	-[ushat,vshat]'*[ush,vsh]/alpha
+	//+dt*dt*[us,vs]'*[ushath,vshath]
+	);
+
+varf ress0Adj([us,vs,ushat,vshat],[ush,vsh,ushath,vshath]) =
+	int2d(Ths0)(g*rhod*vsh - c1*trace((Grad(d1,d2)+ID)*Grad(ush,vsh)')  
+	+ rhod*[usold,vsold]'*[ush,vsh]/dt 
+	-dt*[d1-dg1,d2-dg2]'*[ushath,vshath]
+	);
+
+varf solidAdj([usn,vsn,usnhat,vsnhat],[usnh,vsnh,usnhath,vsnhath]) =	
+	int1d(Ths,5)(c1*(usnhath*N.x+vsnhath*N.y)*div(usnhat,vsnhat));
+
+varf ressAdj([usn,vsn,usnhat,vsnhat],[usnh,vsnh,usnhath,vsnhath]) =	
+	int2d(Ths)(c1*div(usnh,vsnh));
+
+
+
+matrix Aadj = NSAdj(RhAdj,RhAdj,tgv=tgv);
+real[int] bcnAdj = NSAdj(0,RhAdj);//tgv on Dirichlet boundary node ( !=0 )
+matrix Badj = solid0Adj(Rhs0Adj,Rhs0Adj);
+
+// Computation time loop
+for(t=dt;t<Tc;t+=dt){
+	real[int] rhs1 = resNSAdj(0,RhAdj);
+	//lock boundary part:
+	rhs1 = bcnAdj ? bcnAdj : rhs1; //do forall i: b[i] = bcnAdj[i] ? bcnAdj[i] : b[i]
+
+	real[int] rhs2 = ress0Adj(0,Rhs0Adj);
+	real[int] rhs3 = ressAdj(0,RhsAdj);
+	rhs2 += rhs3;
+
+	//matrix Bb = solidAdj(RhsAdj,RhsAdj);
+	//Badj+=Bb;
+
+	matrix P = interpolate(RhsAdj,RhAdj);
+	
+	real[int] rhs = P'*rhs2;
+	rhs += rhs1;
+	matrix T = P'*Badj;
+	matrix AB = T*P;
+	AB += Aadj;
+		
+	set(AB,solver=UMFPACK);
+
+	RhAdj [w1, w2, s1, s2, wp, sp];
+	// Solve
+	real[int] sol(RhAdj.ndof);
+	sol= w1[];
+	sol = AB^-1 * rhs;
+	w1[]=sol; 
+	
+	u=w1; v=w2; uhat=s1; vhat= s2; p=wp; phat=sp;
+
+	usn=u; vsn=v; usnhat=uhat; vsnhat=vhat;
+	us[]=usn[]; vs[]=vsn[];
+	ushat[]=usnhat[]; vshat[]=vsnhat[];
+	d1[] += us[]*dt; 
+	d2[] += vs[]*dt;
+	
+	plot(Th,Ths,[u,v],coef=0.1,fill=0,value=1,wait=1);
+	
+	Ths = movemesh(Ths0, [x+d1, y+d2]);
+	
+	uold=u;vold=v;usold=us;vsold=vs;
+	
+	err=sqrt(int2d(Th)((d1-dg1)^2+(d2-dg2)^2));
+	ofstream file(strerr,append);
+	file.precision(16);
+	file << err << endl;
+	file.flush;	
+	
+	cout<<"Control Time: "<<t<<"  "<<err<<endl;
+	
+	err=sqrt(int2d(Ths0)(ushat^2+vshat^2));
+	ofstream filef(strforce,append);
+	filef.precision(16);
+	filef << err << endl;
+	filef.flush;	
+}
